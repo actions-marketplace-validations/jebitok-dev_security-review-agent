@@ -1,0 +1,67 @@
+version: "1"
+
+# Each entry declares a "protected surface" — a file + required security control.
+# The checker verifies that all signals are still present whenever the file is changed.
+surfaces:
+
+  - id: admin-dashboard-auth
+    description: "Admin dashboard routes require authentication"
+    type: auth
+    severity: warning
+    location:
+      file: fixture-app/src/routes/admin.ts
+      scope: route-handler
+    control:
+      signals:
+        - pattern: "requireAuth"
+          context: "requireAuth middleware must be imported and referenced"
+        - pattern: "router\\.(get|post|put|delete|patch|use).*requireAuth"
+          context: "requireAuth must be wired into at least one route definition"
+      absent_signals:
+        - pattern: "//\\s*requireAuth"
+          context: "Commented-out auth guard detected"
+
+  - id: api-rate-limit
+    description: "Public API data endpoint is rate-limited"
+    type: rate-limit
+    severity: warning
+    location:
+      file: fixture-app/src/routes/api.ts
+      scope: route-handler
+    control:
+      signals:
+        - pattern: "rateLimiter|rateLimit"
+          context: "Rate limiter middleware must be imported and referenced"
+        - pattern: "router\\.(get|post|put|delete|patch|use).*rateLimiter"
+          context: "rateLimiter must be wired into a route definition"
+      absent_signals:
+        - pattern: "//\\s*rateLimiter"
+          context: "Commented-out rate limiter detected"
+
+  - id: file-upload-validation
+    description: "Upload route validates file type and size"
+    type: upload-validation
+    severity: warning
+    location:
+      file: fixture-app/src/routes/upload.ts
+      scope: route-handler
+    control:
+      signals:
+        - pattern: "upload\\.single|upload\\.array|upload\\.fields"
+          context: "Multer upload middleware must be applied to the route"
+      absent_signals:
+        - pattern: "//\\s*upload\\."
+          context: "Commented-out upload validation detected"
+
+# Auto-detect rules: flag newly added route files that match sensitive path patterns
+# but have no corresponding manifest entry (coverage gap, not regression).
+auto_detect:
+  route_file_patterns:
+    - "fixture-app/src/routes/*.ts"
+  suspicious_route_patterns:
+    - pattern: "/admin|/dashboard|/manage|/internal"
+      reason: "Admin-like route path with no manifest entry — add to security-surface.yaml"
+    - pattern: "/upload|/import|/ingest"
+      reason: "Upload-like route path with no manifest entry — add to security-surface.yaml"
+    - pattern: "/auth|/login|/token|/otp|/mfa"
+      reason: "Auth-related route path with no manifest entry — add to security-surface.yaml"

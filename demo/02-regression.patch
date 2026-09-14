@@ -1,0 +1,24 @@
+diff --git a/fixture-app/src/routes/admin.ts b/fixture-app/src/routes/admin.ts
+index 1111111..2222222 100644
+--- a/fixture-app/src/routes/admin.ts
++++ b/fixture-app/src/routes/admin.ts
+@@ -1,14 +1,11 @@
+ import { Router, Request, Response } from 'express';
+-import { requireAuth } from '../middleware/auth';
+
+ const router = Router();
+
+ function adminDashboardHandler(req: Request, res: Response): void {
+   res.json({ message: 'Admin dashboard', userId: req.headers['x-user-id'] });
+ }
+
+ function adminUsersHandler(_req: Request, res: Response): void {
+   res.json({ users: [] });
+ }
+
+-router.get('/dashboard', requireAuth, adminDashboardHandler);
+-router.get('/users', requireAuth, adminUsersHandler);
++router.get('/dashboard', adminDashboardHandler);
++router.get('/users', adminUsersHandler);
+
+ export default router;

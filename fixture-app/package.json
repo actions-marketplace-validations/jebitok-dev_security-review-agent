@@ -1,0 +1,23 @@
+{
+  "name": "security-review-fixture-app",
+  "version": "1.0.0",
+  "description": "Sample Express app with protected surfaces for demo purposes",
+  "main": "dist/app.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/app.js",
+    "dev": "ts-node src/app.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "multer": "^1.4.5-lts.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.0"
+  }
+}

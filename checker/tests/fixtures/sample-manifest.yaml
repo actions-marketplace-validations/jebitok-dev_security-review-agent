@@ -1,0 +1,18 @@
+version: "1"
+surfaces:
+  - id: admin-auth
+    description: "Admin route requires authentication"
+    type: auth
+    severity: warning
+    location:
+      file: fixture-app/src/routes/admin.ts
+      scope: route-handler
+    control:
+      signals:
+        - pattern: "requireAuth"
+          context: "requireAuth middleware must be present"
+        - pattern: "router\\.(get|post).*requireAuth"
+          context: "requireAuth must be wired into a route"
+      absent_signals:
+        - pattern: "//\\s*requireAuth"
+          context: "Commented-out auth guard"

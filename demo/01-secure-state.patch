@@ -1,0 +1,10 @@
+This patch represents the baseline secure state.
+Apply with: git apply demo/01-secure-state.patch
+
+All three security controls are intact:
+  - admin.ts: requireAuth on all routes
+  - api.ts:   rateLimiter on POST /data
+  - upload.ts: upload.single() on POST /upload
+
+Running the checker against this commit should produce:
+  ✓ No security regressions detected.
