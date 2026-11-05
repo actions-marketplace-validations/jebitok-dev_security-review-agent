@@ -244,3 +244,64 @@ describe('big pull requests', () => {
     expect(res.status).toBe(0);
   }, 60000);
 });
+
+describe('--verify-manifest', () => {
+  const { verifyManifest, formatVerify } = require('../src/verify');
+  const files: Record<string, string> = {
+    'src/app/api/contact/route.ts': 'if (rateLimited(ip)) return;',
+  };
+  const read = (f: string) => files[f] ?? null;
+
+  it('passes when every surface matches the current code', () => {
+    const r = verifyManifest(manifest, read);
+    expect(r.issues).toEqual([]);
+    expect(formatVerify(r, 'console')).toMatch(/all 1 surfaces match/);
+  });
+
+  it('reports missing files, stale patterns and disabled guards', () => {
+    const m: Manifest = {
+      version: '1',
+      surfaces: [
+        { ...manifest.surfaces[0], id: 'moved', location: { file: 'gone.ts', scope: 'x' } },
+        { ...manifest.surfaces[0], id: 'stale', control: { signals: [{ pattern: 'rateLimit\\(', context: 'c' }], absent_signals: [] } },
+        { ...manifest.surfaces[0], id: 'off', control: { signals: [], absent_signals: [{ pattern: 'rateLimited', context: 'c' }] } },
+      ],
+    };
+    const r = verifyManifest(m, read);
+    expect(r.issues.map((i: { surfaceId: string; problem: string }) => `${i.surfaceId}:${i.problem}`))
+      .toEqual(['moved:missing-file', 'stale:signal-not-found', 'off:guard-disabled']);
+    expect(formatVerify(r, 'github-comment')).toMatch(/3 problems found/);
+  });
+
+  it('exits 1 from the CLI when the manifest is stale', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-'));
+    fs.writeFileSync(path.join(dir, 'guarded.ts'), 'open();\n');
+    fs.writeFileSync(path.join(dir, 'm.yaml'), `
+version: "1"
+surfaces:
+  - id: guard
+    description: d
+    type: auth
+    severity: error
+    location: { file: guarded.ts, scope: x }
+    control:
+      signals: [{ pattern: "requireAuth", context: c }]
+      absent_signals: []
+  - id: outside
+    description: paths can't escape the repo
+    type: auth
+    severity: error
+    location: { file: ../etc/passwd, scope: x }
+    control:
+      signals: [{ pattern: "root", context: c }]
+      absent_signals: []
+`);
+    const res = spawnSync(process.execPath, ['-r', require.resolve('ts-node/register'), path.resolve(__dirname, '../src/index.ts'), '--manifest', 'm.yaml', '--verify-manifest'], {
+      cwd: dir, encoding: 'utf-8',
+      env: { ...process.env, TS_NODE_TRANSPILE_ONLY: '1', TS_NODE_PROJECT: path.resolve(__dirname, '../tsconfig.json') },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/\[signal-not-found\] guard/);
+    expect(res.stdout).toMatch(/\[missing-file\] outside/);
+  }, 30000);
+});

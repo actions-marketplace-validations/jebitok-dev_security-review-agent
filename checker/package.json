@@ -1,6 +1,6 @@
 {
   "name": "security-regression-checker",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Detects security control regressions in pull request diffs",
   "main": "dist/index.js",
   "bin": {

@@ -6,6 +6,9 @@ branding:
   color: blue
 
 inputs:
+  mode:
+    description: "check = review a pull request (default). verify = confirm the manifest still matches the current code (use on push to main)."
+    default: check
   manifest:
     description: Path to the manifest, relative to the repository root
     default: security-surface.yaml
@@ -31,9 +34,12 @@ runs:
   using: composite
   steps:
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: "22"
+        # Don't auto-cache the calling repo's packages (it may use pnpm/yarn,
+        # which this action doesn't install); the checker installs its own
+        package-manager-cache: false
 
     - name: Build checker
       shell: bash
@@ -47,20 +53,35 @@ runs:
       id: check
       shell: bash
       env:
+        MODE: ${{ inputs.mode }}
         MANIFEST: ${{ inputs.manifest }}
         FAIL_ON: ${{ inputs.fail-on-severity }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
+        out="$RUNNER_TEMP/security-findings.md"
+        if [ "$MODE" = "verify" ]; then
+          set +e
+          node "$GITHUB_ACTION_PATH/checker/dist/index.js" --manifest "$MANIFEST" --verify-manifest --format github-comment --output-file "$out"
+          code=$?
+          set -e
+          echo "findings-file=$out" >> "$GITHUB_OUTPUT"
+          echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+          if [ -f "$out" ]; then cat "$out" >> "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"; fi
+          exit 0
+        fi
+        if [ "$MODE" != "check" ]; then
+          echo "::error::Unknown mode \"$MODE\" (use check or verify)."
+          exit 1
+        fi
         if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
-          echo "::error::This action runs on pull_request events (base and head commits are needed)."
+          echo "::error::mode: check runs on pull_request events (it needs the PR's base and head commits). On push, use mode: verify."
           exit 1
         fi
         if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
           echo "::error::Base commit not found. Use actions/checkout with fetch-depth: 0."
           exit 1
         fi
-        out="$RUNNER_TEMP/security-findings.md"
         args=(--manifest "$MANIFEST" --base "$BASE_SHA" --head "$HEAD_SHA" --format github-comment --output-file "$out")
         if [ -n "$FAIL_ON" ]; then args+=(--fail-on-severity "$FAIL_ON"); fi
         set +e
@@ -69,11 +90,11 @@ runs:
         set -e
         echo "findings-file=$out" >> "$GITHUB_OUTPUT"
         echo "exit-code=$code" >> "$GITHUB_OUTPUT"
-        if [ -f "$out" ]; then cat "$out" >> "$GITHUB_STEP_SUMMARY"; fi
+        if [ -f "$out" ]; then cat "$out" >> "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"; fi
 
     - name: Post or update PR comment
-      if: always() && inputs.comment == 'true' && steps.check.outputs.findings-file != ''
-      uses: actions/github-script@v7
+      if: always() && inputs.mode == 'check' && inputs.comment == 'true' && steps.check.outputs.findings-file != ''
+      uses: actions/github-script@v9
       env:
         FINDINGS_FILE: ${{ steps.check.outputs.findings-file }}
       with:
@@ -105,8 +126,11 @@ runs:
       env:
         CODE: ${{ steps.check.outputs.exit-code }}
         FAIL_ON: ${{ inputs.fail-on-severity }}
+        MODE: ${{ inputs.mode }}
       run: |
-        if [ "$CODE" = "1" ]; then
+        if [ "$MODE" = "verify" ] && [ "$CODE" = "1" ]; then
+          echo "::error::security-surface.yaml no longer matches the code. See the job summary for which surfaces to fix."
+        elif [ "$CODE" = "1" ]; then
           echo "::error::Security regression at or above \"$FAIL_ON\" severity. See the PR comment or job summary."
         else
           echo "::error::The checker could not run (exit $CODE). See the \"Run checker\" step log for the reason."
