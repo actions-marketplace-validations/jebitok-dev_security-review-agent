@@ -46,7 +46,7 @@ const diff_parser_1 = require("./diff-parser");
 const regression_checker_1 = require("./regression-checker");
 const reporter_1 = require("./reporter");
 const args = (0, minimist_1.default)(process.argv.slice(2), {
-    string: ['manifest', 'base', 'head', 'format', 'output-file'],
+    string: ['manifest', 'base', 'head', 'format', 'output-file', 'fail-on-severity'],
     boolean: ['fail-on-warning'],
     default: {
         manifest: 'security-surface.yaml',
@@ -55,33 +55,53 @@ const args = (0, minimist_1.default)(process.argv.slice(2), {
         'fail-on-warning': false,
     },
 });
+// Git is always run with an argument list (never through a shell), so file names
+// and refs from a pull request can't inject commands.
+function git(args) {
+    return (0, child_process_1.execFileSync)('git', args, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 64 * 1024 * 1024,
+    });
+}
+// Refs come from CI inputs; a leading "-" would be read by git as an option
+function assertSafeRef(name, value) {
+    if (!value || value.startsWith('-') || /[\s\0]/.test(value)) {
+        throw new Error(`Invalid --${name} ref: ${JSON.stringify(value)}`);
+    }
+}
 function runGitDiff(base, head) {
-    const cmd = base
-        ? `git diff --unified=5 ${base}..${head}`
-        : `git diff --unified=5 HEAD~1..HEAD`;
-    return (0, child_process_1.execSync)(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const from = base || 'HEAD~1';
+    const to = base ? head : 'HEAD';
+    assertSafeRef('base', from);
+    assertSafeRef('head', to);
+    // -M: report renames explicitly so moved protected files are caught
+    return git(['-c', 'core.quotePath=false', 'diff', '--unified=5', '-M', `${from}..${to}`]);
 }
 function enrichWithFullContent(changedFiles, head) {
     for (const [filePath, record] of Object.entries(changedFiles)) {
         if (record.status === 'deleted')
             continue;
         try {
-            const content = (0, child_process_1.execSync)(`git show ${head}:${filePath}`, {
-                encoding: 'utf-8',
-                stdio: ['pipe', 'pipe', 'pipe'],
-            });
-            record.fullNewContent = content;
+            record.fullNewContent = git(['show', `${head}:${filePath}`]);
         }
         catch {
             // file may not exist at HEAD (e.g. renamed) — fallback to heuristic
         }
     }
 }
+const SEVERITY_RANK = { info: 0, warning: 1, error: 2 };
 async function main() {
     const manifestPath = path.resolve(args.manifest);
     const format = args.format;
     const outputFile = args['output-file'];
-    const failOnWarning = args['fail-on-warning'];
+    // --fail-on-severity <info|warning|error>: exit 1 when a regression at or above
+    // that severity is found. --fail-on-warning is kept as a shortcut for "warning".
+    const failOn = args['fail-on-severity'] || (args['fail-on-warning'] ? 'warning' : undefined);
+    if (failOn && !(failOn in SEVERITY_RANK)) {
+        console.error(`Invalid --fail-on-severity: ${failOn} (use info, warning or error)`);
+        process.exit(1);
+    }
     let manifest;
     try {
         manifest = (0, manifest_1.loadManifest)(manifestPath);
@@ -109,9 +129,13 @@ async function main() {
     else {
         console.log(formatted);
     }
-    const hasRegressions = findings.some((f) => f.type === 'regression');
-    if (failOnWarning && hasRegressions) {
-        process.exit(1);
+    if (failOn) {
+        const threshold = SEVERITY_RANK[failOn];
+        const blocking = findings.some((f) => f.type === 'regression' && SEVERITY_RANK[f.surface.severity] >= threshold);
+        if (blocking) {
+            console.error(`Failing: security regression at or above "${failOn}" severity.`);
+            process.exit(1);
+        }
     }
 }
 main().catch((err) => {

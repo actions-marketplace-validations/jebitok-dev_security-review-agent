@@ -33,6 +33,10 @@ function parseDiff(diffOutput) {
             currentRecord.status = 'deleted';
             continue;
         }
+        if (line.startsWith('rename from ')) {
+            currentRecord.renamedFrom = line.slice('rename from '.length);
+            continue;
+        }
         if (line.startsWith('rename to ')) {
             currentRecord.status = 'renamed';
             continue;

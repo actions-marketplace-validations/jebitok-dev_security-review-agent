@@ -45,6 +45,7 @@ export interface Manifest {
 
 export interface DiffRecord {
   status: FileStatus;
+  renamedFrom?: string; // previous path, when git reports a rename
   removedLines: string[];
   addedLines: string[];
   fullNewContent?: string;
@@ -58,7 +59,7 @@ export interface ControlCheckResult {
   triggeredAbsentSignals: ControlSignal[];
 }
 
-export type FindingType = 'regression' | 'unregistered-surface';
+export type FindingType = 'regression' | 'unregistered-surface' | 'moved-surface';
 
 export interface RegressionFinding {
   type: 'regression';
@@ -75,4 +76,12 @@ export interface UnregisteredSurfaceFinding {
   reason: string;
 }
 
-export type Finding = RegressionFinding | UnregisteredSurfaceFinding;
+// A protected file was renamed/moved, so the manifest entry no longer points at it
+export interface MovedSurfaceFinding {
+  type: 'moved-surface';
+  surface: Surface;
+  newPath: string;
+  controlIntact: boolean;
+}
+
+export type Finding = RegressionFinding | UnregisteredSurfaceFinding | MovedSurfaceFinding;

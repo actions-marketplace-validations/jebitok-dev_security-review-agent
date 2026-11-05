@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import minimist from 'minimist';
 import { loadManifest } from './manifest';
 import { parseDiff } from './diff-parser';
 import { runRegressionCheck } from './regression-checker';
 import { formatFindings } from './reporter';
-import { ChangedFiles, OutputFormat } from './types';
+import { ChangedFiles, OutputFormat, Severity } from './types';
 
 const args = minimist(process.argv.slice(2), {
-  string: ['manifest', 'base', 'head', 'format', 'output-file'],
+  string: ['manifest', 'base', 'head', 'format', 'output-file', 'fail-on-severity'],
   boolean: ['fail-on-warning'],
   default: {
     manifest: 'security-surface.yaml',
@@ -20,33 +20,56 @@ const args = minimist(process.argv.slice(2), {
   },
 });
 
-function runGitDiff(base: string, head: string): string {
-  const cmd = base
-    ? `git diff --unified=5 ${base}..${head}`
-    : `git diff --unified=5 HEAD~1..HEAD`;
-  return execSync(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+// Git is always run with an argument list (never through a shell), so file names
+// and refs from a pull request can't inject commands.
+function git(args: string[]): string {
+  return execFileSync('git', args, {
+    encoding: 'utf-8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+// Refs come from CI inputs; a leading "-" would be read by git as an option
+function assertSafeRef(name: string, value: string): void {
+  if (!value || value.startsWith('-') || /[\s\0]/.test(value)) {
+    throw new Error(`Invalid --${name} ref: ${JSON.stringify(value)}`);
+  }
+}
+
+function runGitDiff(base: string | undefined, head: string): string {
+  const from = base || 'HEAD~1';
+  const to = base ? head : 'HEAD';
+  assertSafeRef('base', from);
+  assertSafeRef('head', to);
+  // -M: report renames explicitly so moved protected files are caught
+  return git(['-c', 'core.quotePath=false', 'diff', '--unified=5', '-M', `${from}..${to}`]);
 }
 
 function enrichWithFullContent(changedFiles: ChangedFiles, head: string): void {
   for (const [filePath, record] of Object.entries(changedFiles)) {
     if (record.status === 'deleted') continue;
     try {
-      const content = execSync(`git show ${head}:${filePath}`, {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      record.fullNewContent = content;
+      record.fullNewContent = git(['show', `${head}:${filePath}`]);
     } catch {
       // file may not exist at HEAD (e.g. renamed) — fallback to heuristic
     }
   }
 }
 
+const SEVERITY_RANK: Record<Severity, number> = { info: 0, warning: 1, error: 2 };
+
 async function main(): Promise<void> {
   const manifestPath = path.resolve(args.manifest);
   const format = args.format as OutputFormat;
   const outputFile = args['output-file'] as string | undefined;
-  const failOnWarning = args['fail-on-warning'] as boolean;
+  // --fail-on-severity <info|warning|error>: exit 1 when a regression at or above
+  // that severity is found. --fail-on-warning is kept as a shortcut for "warning".
+  const failOn = (args['fail-on-severity'] as string | undefined) || (args['fail-on-warning'] ? 'warning' : undefined);
+  if (failOn && !(failOn in SEVERITY_RANK)) {
+    console.error(`Invalid --fail-on-severity: ${failOn} (use info, warning or error)`);
+    process.exit(1);
+  }
 
   let manifest;
   try {
@@ -77,9 +100,15 @@ async function main(): Promise<void> {
     console.log(formatted);
   }
 
-  const hasRegressions = findings.some((f) => f.type === 'regression');
-  if (failOnWarning && hasRegressions) {
-    process.exit(1);
+  if (failOn) {
+    const threshold = SEVERITY_RANK[failOn as Severity];
+    const blocking = findings.some(
+      (f) => f.type === 'regression' && SEVERITY_RANK[f.surface.severity] >= threshold
+    );
+    if (blocking) {
+      console.error(`Failing: security regression at or above "${failOn}" severity.`);
+      process.exit(1);
+    }
   }
 }
 

@@ -51,6 +51,25 @@ function validateSurface(s, index) {
     if (!Array.isArray(control.absent_signals)) {
         throw new Error(`Surface "${surface.id}" control.absent_signals must be an array`);
     }
+    if (!SEVERITIES.includes(surface.severity)) {
+        throw new Error(`Surface "${surface.id}" severity must be one of ${SEVERITIES.join(', ')} (got "${surface.severity}")`);
+    }
+    const signals = [...control.signals, ...control.absent_signals];
+    for (const sig of signals)
+        assertRegex(sig?.pattern, `surface "${surface.id}"`);
+}
+const SEVERITIES = ['info', 'warning', 'error'];
+// Fail early with a clear message instead of crashing mid-check
+function assertRegex(pattern, where) {
+    if (typeof pattern !== 'string' || !pattern) {
+        throw new Error(`Missing or empty pattern in ${where}`);
+    }
+    try {
+        new RegExp(pattern);
+    }
+    catch (err) {
+        throw new Error(`Invalid regex in ${where}: ${pattern} (${err.message})`);
+    }
 }
 function loadManifest(manifestPath) {
     if (!fs.existsSync(manifestPath)) {
@@ -65,5 +84,8 @@ function loadManifest(manifestPath) {
         throw new Error('Manifest "surfaces" must be an array');
     }
     parsed.surfaces.forEach((s, i) => validateSurface(s, i));
+    const autoDetect = parsed.auto_detect;
+    for (const p of autoDetect?.suspicious_route_patterns ?? [])
+        assertRegex(p?.pattern, 'auto_detect');
     return parsed;
 }
