@@ -1,8 +1,30 @@
 # Security Review Agent
 
-A non-blocking GitHub Action that catches security regressions in pull requests cases where a previously hardened route, endpoint, or feature silently loses its security control during a routine code change.
+A non-blocking GitHub Action that catches security regressions in pull requests: cases where a previously hardened route, endpoint, or feature silently loses its security control during a routine code change.
 
-> **Background**: This project is the implementation companion to the Substack article [Designing a Security-First Code Review Agent](https://jebit.substack.com/p/designing-a-security-first-code-review). The article covers the "why" in depth this repo is the working "how".
+> **Background**: This project is the implementation companion to the Substack article [Designing a Security-First Code Review Agent](https://jebit.substack.com/p/designing-a-security-first-code-review). The article covers the "why" in depth; this repo is the working "how".
+
+---
+
+## Contents
+
+- [The problem it solves](#the-problem-it-solves)
+- [How it works](#how-it-works)
+- [The manifest: `security-surface.yaml`](#the-manifest-security-surfaceyaml)
+  - [Field reference](#field-reference)
+  - [Why multiple signals?](#why-multiple-signals)
+  - [Auto-detect: coverage gaps](#auto-detect-coverage-gaps)
+  - [Moved or renamed files](#moved-or-renamed-files)
+- [GitHub Action setup](#github-action-setup)
+  - [Keeping the manifest honest: `mode: verify`](#keeping-the-manifest-honest-mode-verify)
+  - [Running it without the Action](#running-it-without-the-action)
+  - [Versions](#versions)
+- [Example: Next.js (App Router)](#example-nextjs-app-router)
+- [Project layout](#project-layout)
+- [Quick start (local demo)](#quick-start-local-demo)
+- [Fixture app — curl examples](#fixture-app--curl-examples)
+- [Extending to your own codebase](#extending-to-your-own-codebase)
+- [What this is not](#what-this-is-not)
 
 ---
 
@@ -10,7 +32,7 @@ A non-blocking GitHub Action that catches security regressions in pull requests 
 
 Security hardening rarely gets removed on purpose. It erodes.
 
-A senior developer adds `requireAuth` middleware to every admin route. Three months later, a junior developer picks up a ticket to refactor the admin dashboard UI. The code change is legitimate but in the process of restructuring the route file, the middleware is accidentally dropped. No line in the diff looks obviously wrong. Static analysis won't catch it. The test suite won't catch it. The PR reviewer is focused on the UI logic, not the security wiring.
+A senior developer adds `requireAuth` middleware to every admin route. Three months later, a junior developer picks up a ticket to refactor the admin dashboard UI. The code change is legitimate, but in the process of restructuring the route file, the middleware is accidentally dropped. No line in the diff looks obviously wrong. Static analysis won't catch it. The test suite won't catch it. The PR reviewer is focused on the UI logic, not the security wiring.
 
 This tool catches that. It keeps a versioned record of which files are security-hardened and what controls they require, then checks every PR diff against that record.
 
@@ -42,6 +64,10 @@ PR opened / updated
 │      still present?          │
 │    – were any guards         │
 │      commented out?          │
+│  · For moved/renamed files:  │
+│    – was a protected file    │
+│      moved out from under    │
+│      the manifest?           │
 │  · For new route files:      │
 │    – do they match sensitive │
 │      path patterns?          │
@@ -63,6 +89,8 @@ When a regression is found, the PR comment says:
 > **Please have a security-aware reviewer look at this before merging.**
 
 For auth regressions, it also includes a suggested code diff so the fix is one click away.
+
+A second mode, [`verify`](#keeping-the-manifest-honest-mode-verify), runs on pushes to `main` and confirms the manifest itself still matches the code, so a typo or outdated pattern can't leave a surface silently unprotected.
 
 > **Using this in your own project?**
 > The fixture app in this repo is just a demo. The only file you need to edit is `security-surface.yaml` — replace the example entries with your own file paths and security controls. The checker, the Action, and everything else works without any code changes. See [Extending to your own codebase](#extending-to-your-own-codebase) below.
@@ -100,15 +128,17 @@ surfaces:
 | Field | Purpose |
 |-------|---------|
 | `id` | Stable identifier shown in PR comments. Use kebab-case, be descriptive. |
-| `type` | Human grouping does not affect detection logic, just how findings are labelled. |
-| `severity` | `warning` posts a comment but does not fail CI. `error` fails CI if `--fail-on-severity error` is passed to the checker. |
-| `location.file` | Relative path from repo root to the file being guarded. The checker skips a surface if this file is not in the PR diff. |
+| `type` | Human grouping. It doesn't affect detection, just how findings are labelled. |
+| `severity` | `info`, `warning` or `error`. Every finding is commented; the job only fails for regressions at or above `fail-on-severity` (not set = never fails). |
+| `location.file` | Relative path from repo root to the file being guarded. A PR check skips the surface if the PR doesn't touch this file; verify mode always checks it. |
 | `control.signals` | Array of regex patterns that must **all** match somewhere in the file after the change. Losing any one triggers a finding. |
-| `control.absent_signals` | Regex patterns that, if found in the added lines of the diff, indicate a guard was intentionally disabled. |
+| `control.absent_signals` | Regex patterns that indicate a guard was disabled (e.g. commented out). A PR check looks for them in the lines the PR adds; verify mode looks in the whole file. |
+
+The manifest is validated when it loads: missing fields, an unknown `severity` or an invalid regex fail straight away with a message naming the surface.
 
 ### Why multiple signals?
 
-A single regex like `requireAuth` would match a comment or a string literal. Requiring two signals one for presence, one for structural wiring reduces false positives significantly:
+A single regex like `requireAuth` would match a comment or a string literal. Requiring two signals (one for presence, one for structural wiring) reduces false positives significantly:
 
 ```yaml
 signals:
@@ -128,7 +158,7 @@ auto_detect:
     - "src/routes/*.ts"
   suspicious_route_patterns:
     - pattern: "/admin|/dashboard|/manage"
-      reason: "Admin-like route path with no manifest entry add to security-surface.yaml"
+      reason: "Admin-like route path with no manifest entry: add to security-surface.yaml"
     - pattern: "/upload|/import|/ingest"
       reason: "Upload-like route path with no manifest entry"
 ```
@@ -218,6 +248,18 @@ node checker/dist/index.js --manifest security-surface.yaml --base origin/main -
 # add --fail-on-severity error to exit 1 on error-level regressions
 ```
 
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Passed (findings may still be reported) |
+| `1` | A regression at or above `--fail-on-severity`, or, with `--verify-manifest`, problems in the manifest |
+| `2` | The checker couldn't run (bad manifest, missing git history, invalid ref) |
+
+### Versions
+
+- `@v1` follows the latest 1.x release, so you get fixes automatically. Pin an exact version (`@v1.2.0`) or a commit SHA if you prefer to update deliberately.
+- Runs on GitHub-hosted runners as-is. Self-hosted runners need runner v2.327.1 or newer (Node 24 actions).
+- Release notes: [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## Example: Next.js (App Router)
@@ -269,22 +311,25 @@ A new `src/app/api/admin/route.ts` is flagged even if its code never mentions "a
 ├── .github/
 │   └── workflows/
 │       ├── security-check.yml   # runs this repo's own action on every PR
+│       ├── verify-manifest.yml  # verifies this repo's manifest on every push to main
 │       └── test.yml             # builds and runs the checker's tests
 ├── checker/                      # the diff-checker (TypeScript)
 │   ├── src/
 │   │   ├── index.ts              # CLI entry point
 │   │   ├── manifest.ts           # manifest loader + validator
 │   │   ├── diff-parser.ts        # parses git diff output
+│   │   ├── relevant-paths.ts     # picks which changed files need a full diff
 │   │   ├── control-detector.ts   # tests signal presence in a diff record
 │   │   ├── regression-checker.ts # orchestrates checks across all surfaces
 │   │   ├── reporter.ts           # formats findings for console or PR comment
 │   │   ├── suggest.ts            # builds suggested code-diff blocks
+│   │   ├── verify.ts             # --verify-manifest / mode: verify
 │   │   └── types.ts              # shared TypeScript types
 │   └── tests/
 │       ├── diff-parser.test.ts
 │       ├── control-detector.test.ts
 │       ├── regression-checker.test.ts
-│       └── hardening.test.ts     # renames, Next.js routes, manifest checks, CLI safety
+│       └── hardening.test.ts     # renames, Next.js routes, big PRs, verify mode, CLI safety
 ├── fixture-app/                  # small Express app used for demo
 │   └── src/
 │       ├── middleware/
@@ -296,31 +341,36 @@ A new `src/app/api/admin/route.ts` is flagged even if its code never mentions "a
 │           ├── api.ts            # POST /api/data - guarded by rateLimiter
 │           └── upload.ts         # POST /upload - guarded by uploadValidator
 └── demo/
-    ├── 01-secure-state.patch     # establishes all controls intact
+    ├── 01-secure-state.patch     # a note describing the secure baseline (not an applyable patch)
     └── 02-regression.patch       # drops requireAuth from admin routes
 ```
+
+`CHANGELOG.md` lists what changed in each release.
 
 ---
 
 ## Quick start (local demo)
 
 ```bash
-# 1. Install
-npm install --prefix checker
-npm install --prefix fixture-app
-
-# 2. Build the checker
+# 1. Clone, install and build
+git clone https://github.com/jebitok-dev/security-review-agent.git && cd security-review-agent
+npm ci --prefix checker && npm ci --prefix fixture-app
 npm run build --prefix checker
 
-# 3. Init a git repo (required: the checker runs git diff)
-git init && git add . && git commit -m "initial: secure state"
+# 2. Confirm the manifest matches the code (the secure baseline)
+node checker/dist/index.js --manifest security-surface.yaml --verify-manifest
+# ✓ Manifest verified: all 3 surfaces match the current code.
 
-# 4. Apply the regression patch
+# 3. Simulate a PR that drops the auth guard, on a throwaway branch
+git switch -c demo-regression
 git apply demo/02-regression.patch
-git add fixture-app/src/routes/admin.ts && git commit -m "refactor: admin routes"
+git commit -am "refactor: admin routes"
 
-# 5. Run the checker against the last commit
-node checker/dist/index.js --manifest security-surface.yaml
+# 4. Check it like a PR against main
+node checker/dist/index.js --manifest security-surface.yaml --base main --head HEAD
+
+# 5. Clean up
+git switch main && git branch -D demo-regression
 ```
 
 Expected output:
@@ -395,7 +445,7 @@ curl -X POST http://localhost:3000/upload \
 
 3. **Verify locally**: run `node checker/dist/index.js --manifest security-surface.yaml --verify-manifest`. It should report that every surface matches the current code.
 
-4. **Test the detection** by temporarily removing the control in a branch, running the checker, and confirming it fires.
+4. **Test the detection**: on a throwaway branch, remove the control and commit, then run `node checker/dist/index.js --manifest security-surface.yaml --base main --head HEAD` and confirm it reports the surface.
 
 That's it. The manifest is the only thing you need to maintain.
 
@@ -407,6 +457,6 @@ This is a **code-review-time** tool. It detects regressions in static code. It d
 
 - Monitor runtime behavior or detect a compromised account acting maliciously
 - Replace a WAF, intrusion detection system, or runtime security monitoring
-- Guarantee security it only knows about surfaces you've declared in the manifest
+- Guarantee security: it only knows about surfaces you've declared in the manifest
 
 Think of it as institutional memory for security decisions, made machine-checkable.
