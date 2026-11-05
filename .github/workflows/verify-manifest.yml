@@ -1,0 +1,19 @@
+name: Verify Security Manifest
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Confirms every surface in security-surface.yaml still matches the code
+      - uses: ./
+        with:
+          mode: verify

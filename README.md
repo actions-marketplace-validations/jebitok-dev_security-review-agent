@@ -160,7 +160,7 @@ jobs:
   security-regression:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # required: the checker diffs the PR's base and head commits
 
@@ -174,6 +174,7 @@ Then add a `security-surface.yaml` at the root of your repo (see [the manifest](
 
 | Input | Default | Purpose |
 |-------|---------|---------|
+| `mode` | `check` | `check` reviews a pull request. `verify` confirms the manifest still matches the current code (see below). |
 | `manifest` | `security-surface.yaml` | Path to your manifest |
 | `fail-on-severity` | _(empty)_ | `info`, `warning` or `error`. Fail the job when a regression at or above this level is found. Empty means never fail. |
 | `comment` | `true` | Post or update one summary comment on the PR |
@@ -185,6 +186,29 @@ Then add a `security-surface.yaml` at the root of your repo (see [the manifest](
 - **One comment per PR.** Later pushes update the same comment instead of adding new ones.
 - **Always a report.** The findings are also written to the job summary, so forks (whose tokens can't comment) still get them.
 - **No secrets needed.** It uses the automatic `GITHUB_TOKEN`.
+
+### Keeping the manifest honest: `mode: verify`
+
+The PR check only looks at files a PR touches, so a typo in a pattern, or code that changed long ago, can leave a surface quietly unprotected. Verify mode catches that: it confirms every listed file exists, every pattern still matches, and no "disabled guard" pattern is present. Run it on every push to `main`:
+
+```yaml
+name: Verify Security Manifest
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jebitok-dev/security-review-agent@v1
+        with:
+          mode: verify
+```
+
+It fails with a list of the surfaces to fix. Locally: `node checker/dist/index.js --manifest security-surface.yaml --verify-manifest` (exit `1` when something needs fixing).
 
 ### Running it without the Action
 
@@ -369,7 +393,7 @@ curl -X POST http://localhost:3000/upload \
 
 2. **Add a surface entry** to `security-surface.yaml` with the file path and one or two signal patterns that uniquely identify the control.
 
-3. **Verify locally** by running the checker against a diff where the control is intact it should produce no findings.
+3. **Verify locally**: run `node checker/dist/index.js --manifest security-surface.yaml --verify-manifest`. It should report that every surface matches the current code.
 
 4. **Test the detection** by temporarily removing the control in a branch, running the checker, and confirming it fires.
 

@@ -8,11 +8,12 @@ import { parseDiff } from './diff-parser';
 import { parseNameStatus, relevantPaths } from './relevant-paths';
 import { runRegressionCheck } from './regression-checker';
 import { formatFindings } from './reporter';
+import { formatVerify, verifyManifest } from './verify';
 import { ChangedFiles, Manifest, OutputFormat, Severity } from './types';
 
 const args = minimist(process.argv.slice(2), {
   string: ['manifest', 'base', 'head', 'format', 'output-file', 'fail-on-severity'],
-  boolean: ['fail-on-warning'],
+  boolean: ['fail-on-warning', 'verify-manifest'],
   default: {
     manifest: 'security-surface.yaml',
     head: 'HEAD',
@@ -67,9 +68,31 @@ function enrichWithFullContent(changedFiles: ChangedFiles, head: string): void {
   }
 }
 
-// Exit codes: 0 = ok, 1 = regression at/above --fail-on-severity, 2 = checker couldn't run
+// Exit codes: 0 = ok, 1 = regression at/above --fail-on-severity (or, with
+// --verify-manifest, problems in the manifest), 2 = the checker couldn't run
 const EXIT_REGRESSION = 1;
 const EXIT_ERROR = 2;
+
+// Reads a repo file for --verify-manifest; null when it doesn't exist
+function readRepoFile(file: string): string | null {
+  const root = process.cwd();
+  const full = path.resolve(root, file);
+  if (!full.startsWith(root + path.sep)) return null; // stay inside the repository
+  try {
+    return fs.statSync(full).isFile() ? fs.readFileSync(full, 'utf-8') : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeOutput(text: string, outputFile: string | undefined): void {
+  if (outputFile) {
+    fs.writeFileSync(outputFile, text, 'utf-8');
+    console.log(`Report written to ${outputFile}`);
+  } else {
+    console.log(text);
+  }
+}
 
 const SEVERITY_RANK: Record<Severity, number> = { info: 0, warning: 1, error: 2 };
 
@@ -91,6 +114,14 @@ async function main(): Promise<void> {
   } catch (err) {
     console.error(`Error loading manifest: ${(err as Error).message}`);
     process.exit(EXIT_ERROR);
+  }
+
+  // --verify-manifest: check the manifest against the current code (no PR needed)
+  if (args['verify-manifest']) {
+    const result = verifyManifest(manifest, readRepoFile);
+    writeOutput(formatVerify(result, format), outputFile);
+    if (outputFile) console.log(formatVerify(result, 'console'));
+    process.exit(result.issues.length ? EXIT_REGRESSION : 0);
   }
 
   let diffOutput: string;

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0
+
+- New `mode: verify` (CLI: `--verify-manifest`): confirms every surface in the manifest still matches the current code (file exists, patterns match, no disabled guard). Run it on push to `main` so a typo or outdated pattern fails straight away instead of silently protecting nothing.
+- Uses Node 24 versions of its dependencies (`actions/setup-node@v7`, `actions/github-script@v9`), clearing GitHub's "Node.js 20 is deprecated" warning. Self-hosted runners need runner v2.327.1 or newer.
+- Turns off `setup-node`'s automatic package caching, so repositories using pnpm or yarn aren't affected.
+- README and this repo's workflows use `actions/checkout@v7`.
+
 ## 1.1.0
 
 **Security**
