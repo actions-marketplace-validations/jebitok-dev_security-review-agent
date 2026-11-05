@@ -33,6 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.matchesGlob = matchesGlob;
 exports.runRegressionCheck = runRegressionCheck;
 const path = __importStar(require("path"));
 const control_detector_1 = require("./control-detector");

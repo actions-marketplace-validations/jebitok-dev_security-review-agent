@@ -2,7 +2,7 @@ import * as path from 'path';
 import { Manifest, ChangedFiles, Finding, RegressionFinding, DiffRecord } from './types';
 import { checkControl } from './control-detector';
 
-function matchesGlob(filePath: string, pattern: string): boolean {
+export function matchesGlob(filePath: string, pattern: string): boolean {
   // Simple glob support: convert * and ** to regex equivalents
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')

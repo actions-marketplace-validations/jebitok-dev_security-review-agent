@@ -15,6 +15,8 @@
 - Report is also written to the job summary, so pull requests from forks still get it.
 
 **Fixes**
+- Large pull requests no longer crash the check (`ENOBUFS`). It lists changed files first and only diffs the ones it checks, so a PR deleting thousands of unrelated files stays fast.
+- Exit codes: `1` = regression at or above `--fail-on-severity`, `2` = the checker couldn't run. The action's error message says which.
 - PR comment table: `|` in patterns no longer splits table columns.
 - `demo/02-regression.patch` was corrupt (blank context lines had lost their leading space), so the README quick start failed at `git apply`. Regenerated, and `.editorconfig` / `.gitattributes` now stop editors trimming patch files.
 - The "Powered by" link in comments pointed at the wrong repo when used elsewhere.

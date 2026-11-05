@@ -6,6 +6,7 @@ import { parseDiff } from '../src/diff-parser';
 import { runRegressionCheck } from '../src/regression-checker';
 import { loadManifest } from '../src/manifest';
 import { formatFindings } from '../src/reporter';
+import { parseNameStatus, relevantPaths } from '../src/relevant-paths';
 import { ChangedFiles, Manifest } from '../src/types';
 
 const manifest: Manifest = {
@@ -169,7 +170,7 @@ surfaces:
   it('rejects refs that git would read as options', () => {
     const { dir } = repo();
     const res = run(dir, ['--base=--output=/tmp/x', '--head', 'HEAD']);
-    expect(res.status).toBe(1);
+    expect(res.status).toBe(2); // 2 = the checker couldn't run
     expect(res.stderr).toMatch(/Invalid --base ref/);
   }, 30000);
 
@@ -198,4 +199,48 @@ describe('PR comment table', () => {
     expect(row).toContain('`router\\.(get\\|post)`');
     expect(row.split(/(?<!\\)\|/).length).toBe(6); // 4 columns + 2 outer edges
   });
+});
+
+describe('only diffing the files that matter', () => {
+  it('parses NUL-separated name-status output, including renames', () => {
+    const out = 'M\0src/a.ts\0R097\0old/b.ts\0new/b.ts\0D\0vendor/x.js\0';
+    expect(parseNameStatus(out)).toEqual([
+      { status: 'M', path: 'src/a.ts' },
+      { status: 'R097', path: 'new/b.ts', oldPath: 'old/b.ts' },
+      { status: 'D', path: 'vendor/x.js' },
+    ]);
+  });
+
+  it('keeps protected files, both sides of their renames, and new route files', () => {
+    const picked = relevantPaths(manifest, [
+      { status: 'M', path: 'src/app/api/contact/route.ts' },
+      { status: 'A', path: 'src/app/api/admin/route.ts' },
+      { status: 'D', path: 'node_modules/huge/index.js' },
+      { status: 'M', path: 'README.md' },
+    ]);
+    expect(picked.sort()).toEqual(['src/app/api/admin/route.ts', 'src/app/api/contact/route.ts']);
+    expect(relevantPaths(manifest, [
+      { status: 'R100', oldPath: 'src/app/api/contact/route.ts', path: 'src/app/api/enquiry/route.ts' },
+    ]).sort()).toEqual(['src/app/api/contact/route.ts', 'src/app/api/enquiry/route.ts']);
+  });
+});
+
+describe('big pull requests', () => {
+  it('handles a PR that deletes a huge unrelated file (the 89 MB node_modules case)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'checker-big-'));
+    const g = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+    g('init', '-q'); g('config', 'user.email', 't@e.com'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'm.yaml'), 'version: "1"\nsurfaces: []\n');
+    // ~70 MB of text, more than the old single-diff approach could read
+    const line = 'vendored line of text that nobody needs to review\n';
+    fs.writeFileSync(path.join(dir, 'vendor.txt'), line.repeat(Math.ceil(70e6 / line.length)));
+    g('add', '.'); g('commit', '-qm', 'base');
+    g('rm', '-q', 'vendor.txt'); g('commit', '-qm', 'drop vendored file');
+    const res = spawnSync(process.execPath, ['-r', require.resolve('ts-node/register'), path.resolve(__dirname, '../src/index.ts'), '--manifest', 'm.yaml'], {
+      cwd: dir, encoding: 'utf-8',
+      env: { ...process.env, TS_NODE_TRANSPILE_ONLY: '1', TS_NODE_PROJECT: path.resolve(__dirname, '../tsconfig.json') },
+    });
+    expect(res.stderr).not.toMatch(/ENOBUFS/);
+    expect(res.status).toBe(0);
+  }, 60000);
 });

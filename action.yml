@@ -24,7 +24,7 @@ outputs:
     description: Path to the Markdown report
     value: ${{ steps.check.outputs.findings-file }}
   exit-code:
-    description: "0 = passed, 1 = failed the fail-on-severity threshold or errored"
+    description: "0 = passed, 1 = regression at or above fail-on-severity, 2 = the checker could not run"
     value: ${{ steps.check.outputs.exit-code }}
 
 runs:
@@ -99,7 +99,16 @@ runs:
             core.warning(`Could not comment on the PR (${err.message}). See the job summary for the report.`);
           }
 
-    - name: Apply fail-on-severity result
+    - name: Apply result
       if: steps.check.outputs.exit-code != '0' && steps.check.outputs.exit-code != ''
       shell: bash
-      run: exit 1
+      env:
+        CODE: ${{ steps.check.outputs.exit-code }}
+        FAIL_ON: ${{ inputs.fail-on-severity }}
+      run: |
+        if [ "$CODE" = "1" ]; then
+          echo "::error::Security regression at or above \"$FAIL_ON\" severity. See the PR comment or job summary."
+        else
+          echo "::error::The checker could not run (exit $CODE). See the \"Run checker\" step log for the reason."
+        fi
+        exit 1

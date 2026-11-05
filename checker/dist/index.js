@@ -43,6 +43,7 @@ const child_process_1 = require("child_process");
 const minimist_1 = __importDefault(require("minimist"));
 const manifest_1 = require("./manifest");
 const diff_parser_1 = require("./diff-parser");
+const relevant_paths_1 = require("./relevant-paths");
 const regression_checker_1 = require("./regression-checker");
 const reporter_1 = require("./reporter");
 const args = (0, minimist_1.default)(process.argv.slice(2), {
@@ -70,13 +71,21 @@ function assertSafeRef(name, value) {
         throw new Error(`Invalid --${name} ref: ${JSON.stringify(value)}`);
     }
 }
-function runGitDiff(base, head) {
+function runGitDiff(manifest, base, head) {
     const from = base || 'HEAD~1';
     const to = base ? head : 'HEAD';
     assertSafeRef('base', from);
     assertSafeRef('head', to);
-    // -M: report renames explicitly so moved protected files are caught
-    return git(['-c', 'core.quotePath=false', 'diff', '--unified=5', '-M', `${from}..${to}`]);
+    const range = `${from}..${to}`;
+    // 1. List what changed (names only, small even for huge PRs).
+    //    -M reports renames so moved protected files are caught.
+    const names = (0, relevant_paths_1.parseNameStatus)(git(['-c', 'core.quotePath=false', 'diff', '--name-status', '-z', '-M', range]));
+    // 2. Full diff only for the files the checks need
+    const paths = (0, relevant_paths_1.relevantPaths)(manifest, names);
+    if (paths.length === 0)
+        return '';
+    const pathspecs = paths.map((p) => `:(literal)${p}`); // no glob/magic from file names
+    return git(['-c', 'core.quotePath=false', 'diff', '--unified=5', '-M', range, '--', ...pathspecs]);
 }
 function enrichWithFullContent(changedFiles, head) {
     for (const [filePath, record] of Object.entries(changedFiles)) {
@@ -90,6 +99,9 @@ function enrichWithFullContent(changedFiles, head) {
         }
     }
 }
+// Exit codes: 0 = ok, 1 = regression at/above --fail-on-severity, 2 = checker couldn't run
+const EXIT_REGRESSION = 1;
+const EXIT_ERROR = 2;
 const SEVERITY_RANK = { info: 0, warning: 1, error: 2 };
 async function main() {
     const manifestPath = path.resolve(args.manifest);
@@ -100,7 +112,7 @@ async function main() {
     const failOn = args['fail-on-severity'] || (args['fail-on-warning'] ? 'warning' : undefined);
     if (failOn && !(failOn in SEVERITY_RANK)) {
         console.error(`Invalid --fail-on-severity: ${failOn} (use info, warning or error)`);
-        process.exit(1);
+        process.exit(EXIT_ERROR);
     }
     let manifest;
     try {
@@ -108,15 +120,15 @@ async function main() {
     }
     catch (err) {
         console.error(`Error loading manifest: ${err.message}`);
-        process.exit(1);
+        process.exit(EXIT_ERROR);
     }
     let diffOutput;
     try {
-        diffOutput = runGitDiff(args.base, args.head);
+        diffOutput = runGitDiff(manifest, args.base, args.head);
     }
     catch (err) {
         console.error(`Error running git diff: ${err.message}`);
-        process.exit(1);
+        process.exit(EXIT_ERROR);
     }
     const changedFiles = (0, diff_parser_1.parseDiff)(diffOutput);
     enrichWithFullContent(changedFiles, args.head);
@@ -134,11 +146,11 @@ async function main() {
         const blocking = findings.some((f) => f.type === 'regression' && SEVERITY_RANK[f.surface.severity] >= threshold);
         if (blocking) {
             console.error(`Failing: security regression at or above "${failOn}" severity.`);
-            process.exit(1);
+            process.exit(EXIT_REGRESSION);
         }
     }
 }
 main().catch((err) => {
     console.error('Unexpected error:', err);
-    process.exit(1);
+    process.exit(EXIT_ERROR);
 });
