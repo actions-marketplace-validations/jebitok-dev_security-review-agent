@@ -133,13 +133,17 @@ auto_detect:
       reason: "Upload-like route path with no manifest entry"
 ```
 
-This catches the case where a developer adds a new `/admin/reports.ts` route but never registers it in the manifest.
+This catches the case where a developer adds a new `/admin/reports.ts` route but never registers it in the manifest. Patterns are matched against the new file's content, its name and its full path.
+
+### Moved or renamed files
+
+If a PR renames or moves a protected file, the checker reports it (and still checks the control at the new location), so the manifest can be updated. Without this, moving a file would quietly take it out of the manifest's protection.
 
 ---
 
 ## GitHub Action setup
 
-Add this file to `.github/workflows/security-check.yml`:
+Use it from any repository as a GitHub Action. Add `.github/workflows/security-check.yml`:
 
 ```yaml
 name: Security Regression Check
@@ -149,85 +153,86 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  pull-requests: write
+  pull-requests: write   # to post the summary comment
   contents: read
 
 jobs:
   security-regression:
-    name: Detect Security Regressions
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout with full history
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0        # required the checker needs git history for diffs
+          fetch-depth: 0   # required: the checker diffs the PR's base and head commits
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: jebitok-dev/security-review-agent@v1
         with:
-          node-version: '22'
-
-      - name: Install checker
-        run: npm ci --prefix checker
-
-      - name: Build checker
-        run: npm run build --prefix checker
-
-      - name: Run security regression checker
-        id: checker
-        run: |
-          node checker/dist/index.js \
-            --manifest security-surface.yaml \
-            --base ${{ github.event.pull_request.base.sha }} \
-            --head ${{ github.event.pull_request.head.sha }} \
-            --format github-comment \
-            --output-file /tmp/security-findings.md
-        continue-on-error: true   # non-blocking: CI passes even when regressions are found
-
-      - name: Post or update PR comment
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const body = fs.readFileSync('/tmp/security-findings.md', 'utf8');
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const existing = comments.find(c =>
-              c.user.login === 'github-actions[bot]' &&
-              c.body.includes('## Security Regression Check')
-            );
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body,
-              });
-            }
+          manifest: security-surface.yaml   # default
+          # fail-on-severity: error         # optional: fail CI on regressions at this level
 ```
 
-**Key design decisions:**
+Then add a `security-surface.yaml` at the root of your repo (see [the manifest](#the-manifest-security-surfaceyaml) and the [Next.js example](#example-nextjs-app-router)).
 
-- `fetch-depth: 0` is not optional. Without full history, `git diff <base-sha>..<head-sha>` will fail with "unknown revision".
-- `continue-on-error: true` makes the check non-blocking. The comment does the communicating; merging is still a team decision.
-- The comment upsert pattern (check for existing bot comment, update if found) prevents a PR with 10 pushes from getting 10 separate bot comments.
-- No secrets needed `actions/github-script` uses the automatically-provided `GITHUB_TOKEN`.
+| Input | Default | Purpose |
+|-------|---------|---------|
+| `manifest` | `security-surface.yaml` | Path to your manifest |
+| `fail-on-severity` | _(empty)_ | `info`, `warning` or `error`. Fail the job when a regression at or above this level is found. Empty means never fail. |
+| `comment` | `true` | Post or update one summary comment on the PR |
+| `github-token` | `github.token` | Token used for the comment |
 
-### Making it blocking for critical surfaces
+**How it behaves:**
 
-If you want regressions on a specific surface to fail CI, set `severity: error` in the manifest for that surface and pass `--fail-on-severity error` to the checker (remove `continue-on-error: true` from the Action step). The checker exits `1` when any finding meets or exceeds the specified severity.
+- **Non-blocking by default.** The comment does the communicating; merging stays a team decision. Set `fail-on-severity: error` and mark critical surfaces `severity: error` to block merges on those only.
+- **One comment per PR.** Later pushes update the same comment instead of adding new ones.
+- **Always a report.** The findings are also written to the job summary, so forks (whose tokens can't comment) still get them.
+- **No secrets needed.** It uses the automatic `GITHUB_TOKEN`.
+
+### Running it without the Action
+
+```bash
+npm ci --prefix checker && npm run build --prefix checker
+node checker/dist/index.js --manifest security-surface.yaml --base origin/main --head HEAD
+# add --fail-on-severity error to exit 1 on error-level regressions
+```
+
+---
+
+## Example: Next.js (App Router)
+
+Next.js puts the URL in folder names and every API file is called `route.ts`, so auto-detect matches patterns against the full file path:
+
+```yaml
+version: "1"
+surfaces:
+  - id: contact-form-spam-protection
+    description: Contact form keeps its spam trap, timing check and rate limit
+    type: rate-limit
+    severity: error
+    location:
+      file: src/app/api/contact/route.ts
+      scope: route-handler
+    control:
+      signals:
+        - pattern: "body\\.hp"
+          context: "Hidden spam-trap field must still be checked"
+        - pattern: "MIN_FILL_MS"
+          context: "Too-fast submissions must still be rejected"
+        - pattern: "rateLimited\\("
+          context: "Per-visitor rate limit must still be applied"
+      absent_signals:
+        - pattern: "//\\s*if \\(rateLimited"
+          context: "Commented-out rate limit"
+
+auto_detect:
+  route_file_patterns:
+    - "src/app/api/**/route.ts"
+  suspicious_route_patterns:
+    - pattern: "/admin|/dashboard|/internal"
+      reason: "Admin-like route with no manifest entry"
+    - pattern: "/webhook|/upload|/import"
+      reason: "Inbound-data route with no manifest entry"
+```
+
+A new `src/app/api/admin/route.ts` is flagged even if its code never mentions "admin".
 
 ---
 
@@ -235,10 +240,12 @@ If you want regressions on a specific surface to fail CI, set `severity: error` 
 
 ```
 .
-├── security-surface.yaml         # the manifest declare protected surfaces here
+├── action.yml                    # the reusable GitHub Action (uses: jebitok-dev/security-review-agent@v1)
+├── security-surface.yaml         # the manifest: declare protected surfaces here
 ├── .github/
 │   └── workflows/
-│       └── security-check.yml   # the GitHub Action
+│       ├── security-check.yml   # runs this repo's own action on every PR
+│       └── test.yml             # builds and runs the checker's tests
 ├── checker/                      # the diff-checker (TypeScript)
 │   ├── src/
 │   │   ├── index.ts              # CLI entry point
@@ -252,7 +259,8 @@ If you want regressions on a specific surface to fail CI, set `severity: error` 
 │   └── tests/
 │       ├── diff-parser.test.ts
 │       ├── control-detector.test.ts
-│       └── regression-checker.test.ts
+│       ├── regression-checker.test.ts
+│       └── hardening.test.ts     # renames, Next.js routes, manifest checks, CLI safety
 ├── fixture-app/                  # small Express app used for demo
 │   └── src/
 │       ├── middleware/

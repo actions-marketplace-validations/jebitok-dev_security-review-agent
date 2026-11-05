@@ -17,6 +17,25 @@ function validateSurface(s: unknown, index: number): asserts s is Surface {
   if (!Array.isArray(control.absent_signals)) {
     throw new Error(`Surface "${surface.id}" control.absent_signals must be an array`);
   }
+  if (!SEVERITIES.includes(surface.severity as string)) {
+    throw new Error(`Surface "${surface.id}" severity must be one of ${SEVERITIES.join(', ')} (got "${surface.severity}")`);
+  }
+  const signals = [...(control.signals as { pattern: string }[]), ...(control.absent_signals as { pattern: string }[])];
+  for (const sig of signals) assertRegex(sig?.pattern, `surface "${surface.id}"`);
+}
+
+const SEVERITIES = ['info', 'warning', 'error'];
+
+// Fail early with a clear message instead of crashing mid-check
+function assertRegex(pattern: unknown, where: string): void {
+  if (typeof pattern !== 'string' || !pattern) {
+    throw new Error(`Missing or empty pattern in ${where}`);
+  }
+  try {
+    new RegExp(pattern);
+  } catch (err) {
+    throw new Error(`Invalid regex in ${where}: ${pattern} (${(err as Error).message})`);
+  }
 }
 
 export function loadManifest(manifestPath: string): Manifest {
@@ -35,6 +54,9 @@ export function loadManifest(manifestPath: string): Manifest {
   }
 
   parsed.surfaces.forEach((s, i) => validateSurface(s, i));
+
+  const autoDetect = parsed.auto_detect as { suspicious_route_patterns?: { pattern: string }[] } | undefined;
+  for (const p of autoDetect?.suspicious_route_patterns ?? []) assertRegex(p?.pattern, 'auto_detect');
 
   return parsed as unknown as Manifest;
 }

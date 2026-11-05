@@ -1,0 +1,114 @@
+name: Security Regression Check
+description: Flags pull requests that remove or weaken security controls declared in security-surface.yaml
+author: jebitok-dev
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  manifest:
+    description: Path to the manifest, relative to the repository root
+    default: security-surface.yaml
+  fail-on-severity:
+    description: "Fail the check on a regression at or above this severity (info, warning or error). Empty = never fail."
+    default: ""
+  comment:
+    description: Post (or update) a summary comment on the pull request
+    default: "true"
+  github-token:
+    description: Token used to comment on the pull request
+    default: ${{ github.token }}
+
+outputs:
+  findings-file:
+    description: Path to the Markdown report
+    value: ${{ steps.check.outputs.findings-file }}
+  exit-code:
+    description: "0 = passed, 1 = regression at or above fail-on-severity, 2 = the checker could not run"
+    value: ${{ steps.check.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - name: Build checker
+      shell: bash
+      run: |
+        npm ci --prefix "$GITHUB_ACTION_PATH/checker" --no-audit --no-fund
+        npm run build --prefix "$GITHUB_ACTION_PATH/checker"
+
+    # Inputs are passed as environment variables, never pasted into the script,
+    # so a crafted value can't inject shell commands
+    - name: Run checker
+      id: check
+      shell: bash
+      env:
+        MANIFEST: ${{ inputs.manifest }}
+        FAIL_ON: ${{ inputs.fail-on-severity }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+          echo "::error::This action runs on pull_request events (base and head commits are needed)."
+          exit 1
+        fi
+        if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+          echo "::error::Base commit not found. Use actions/checkout with fetch-depth: 0."
+          exit 1
+        fi
+        out="$RUNNER_TEMP/security-findings.md"
+        args=(--manifest "$MANIFEST" --base "$BASE_SHA" --head "$HEAD_SHA" --format github-comment --output-file "$out")
+        if [ -n "$FAIL_ON" ]; then args+=(--fail-on-severity "$FAIL_ON"); fi
+        set +e
+        node "$GITHUB_ACTION_PATH/checker/dist/index.js" "${args[@]}"
+        code=$?
+        set -e
+        echo "findings-file=$out" >> "$GITHUB_OUTPUT"
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        if [ -f "$out" ]; then cat "$out" >> "$GITHUB_STEP_SUMMARY"; fi
+
+    - name: Post or update PR comment
+      if: always() && inputs.comment == 'true' && steps.check.outputs.findings-file != ''
+      uses: actions/github-script@v7
+      env:
+        FINDINGS_FILE: ${{ steps.check.outputs.findings-file }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          const file = process.env.FINDINGS_FILE;
+          if (!fs.existsSync(file)) return core.info('No findings file, skipping comment');
+          const body = fs.readFileSync(file, 'utf8');
+          const marker = '## Security Regression Check';
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+          });
+          const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+          try {
+            if (existing) {
+              await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
+            }
+          } catch (err) {
+            // Pull requests from forks get a read-only token; the job summary still has the report
+            core.warning(`Could not comment on the PR (${err.message}). See the job summary for the report.`);
+          }
+
+    - name: Apply result
+      if: steps.check.outputs.exit-code != '0' && steps.check.outputs.exit-code != ''
+      shell: bash
+      env:
+        CODE: ${{ steps.check.outputs.exit-code }}
+        FAIL_ON: ${{ inputs.fail-on-severity }}
+      run: |
+        if [ "$CODE" = "1" ]; then
+          echo "::error::Security regression at or above \"$FAIL_ON\" severity. See the PR comment or job summary."
+        else
+          echo "::error::The checker could not run (exit $CODE). See the \"Run checker\" step log for the reason."
+        fi
+        exit 1

@@ -1,0 +1,10 @@
+root = true
+
+[*]
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Patches need their leading/trailing spaces exactly as git wrote them
+[*.patch]
+trim_trailing_whitespace = false

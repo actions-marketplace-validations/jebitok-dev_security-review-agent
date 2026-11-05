@@ -43,10 +43,11 @@ const child_process_1 = require("child_process");
 const minimist_1 = __importDefault(require("minimist"));
 const manifest_1 = require("./manifest");
 const diff_parser_1 = require("./diff-parser");
+const relevant_paths_1 = require("./relevant-paths");
 const regression_checker_1 = require("./regression-checker");
 const reporter_1 = require("./reporter");
 const args = (0, minimist_1.default)(process.argv.slice(2), {
-    string: ['manifest', 'base', 'head', 'format', 'output-file'],
+    string: ['manifest', 'base', 'head', 'format', 'output-file', 'fail-on-severity'],
     boolean: ['fail-on-warning'],
     default: {
         manifest: 'security-surface.yaml',
@@ -55,48 +56,79 @@ const args = (0, minimist_1.default)(process.argv.slice(2), {
         'fail-on-warning': false,
     },
 });
-function runGitDiff(base, head) {
-    const cmd = base
-        ? `git diff --unified=5 ${base}..${head}`
-        : `git diff --unified=5 HEAD~1..HEAD`;
-    return (0, child_process_1.execSync)(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+// Git is always run with an argument list (never through a shell), so file names
+// and refs from a pull request can't inject commands.
+function git(args) {
+    return (0, child_process_1.execFileSync)('git', args, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 64 * 1024 * 1024,
+    });
+}
+// Refs come from CI inputs; a leading "-" would be read by git as an option
+function assertSafeRef(name, value) {
+    if (!value || value.startsWith('-') || /[\s\0]/.test(value)) {
+        throw new Error(`Invalid --${name} ref: ${JSON.stringify(value)}`);
+    }
+}
+function runGitDiff(manifest, base, head) {
+    const from = base || 'HEAD~1';
+    const to = base ? head : 'HEAD';
+    assertSafeRef('base', from);
+    assertSafeRef('head', to);
+    const range = `${from}..${to}`;
+    // 1. List what changed (names only, small even for huge PRs).
+    //    -M reports renames so moved protected files are caught.
+    const names = (0, relevant_paths_1.parseNameStatus)(git(['-c', 'core.quotePath=false', 'diff', '--name-status', '-z', '-M', range]));
+    // 2. Full diff only for the files the checks need
+    const paths = (0, relevant_paths_1.relevantPaths)(manifest, names);
+    if (paths.length === 0)
+        return '';
+    const pathspecs = paths.map((p) => `:(literal)${p}`); // no glob/magic from file names
+    return git(['-c', 'core.quotePath=false', 'diff', '--unified=5', '-M', range, '--', ...pathspecs]);
 }
 function enrichWithFullContent(changedFiles, head) {
     for (const [filePath, record] of Object.entries(changedFiles)) {
         if (record.status === 'deleted')
             continue;
         try {
-            const content = (0, child_process_1.execSync)(`git show ${head}:${filePath}`, {
-                encoding: 'utf-8',
-                stdio: ['pipe', 'pipe', 'pipe'],
-            });
-            record.fullNewContent = content;
+            record.fullNewContent = git(['show', `${head}:${filePath}`]);
         }
         catch {
             // file may not exist at HEAD (e.g. renamed) — fallback to heuristic
         }
     }
 }
+// Exit codes: 0 = ok, 1 = regression at/above --fail-on-severity, 2 = checker couldn't run
+const EXIT_REGRESSION = 1;
+const EXIT_ERROR = 2;
+const SEVERITY_RANK = { info: 0, warning: 1, error: 2 };
 async function main() {
     const manifestPath = path.resolve(args.manifest);
     const format = args.format;
     const outputFile = args['output-file'];
-    const failOnWarning = args['fail-on-warning'];
+    // --fail-on-severity <info|warning|error>: exit 1 when a regression at or above
+    // that severity is found. --fail-on-warning is kept as a shortcut for "warning".
+    const failOn = args['fail-on-severity'] || (args['fail-on-warning'] ? 'warning' : undefined);
+    if (failOn && !(failOn in SEVERITY_RANK)) {
+        console.error(`Invalid --fail-on-severity: ${failOn} (use info, warning or error)`);
+        process.exit(EXIT_ERROR);
+    }
     let manifest;
     try {
         manifest = (0, manifest_1.loadManifest)(manifestPath);
     }
     catch (err) {
         console.error(`Error loading manifest: ${err.message}`);
-        process.exit(1);
+        process.exit(EXIT_ERROR);
     }
     let diffOutput;
     try {
-        diffOutput = runGitDiff(args.base, args.head);
+        diffOutput = runGitDiff(manifest, args.base, args.head);
     }
     catch (err) {
         console.error(`Error running git diff: ${err.message}`);
-        process.exit(1);
+        process.exit(EXIT_ERROR);
     }
     const changedFiles = (0, diff_parser_1.parseDiff)(diffOutput);
     enrichWithFullContent(changedFiles, args.head);
@@ -109,12 +141,16 @@ async function main() {
     else {
         console.log(formatted);
     }
-    const hasRegressions = findings.some((f) => f.type === 'regression');
-    if (failOnWarning && hasRegressions) {
-        process.exit(1);
+    if (failOn) {
+        const threshold = SEVERITY_RANK[failOn];
+        const blocking = findings.some((f) => f.type === 'regression' && SEVERITY_RANK[f.surface.severity] >= threshold);
+        if (blocking) {
+            console.error(`Failing: security regression at or above "${failOn}" severity.`);
+            process.exit(EXIT_REGRESSION);
+        }
     }
 }
 main().catch((err) => {
     console.error('Unexpected error:', err);
-    process.exit(1);
+    process.exit(EXIT_ERROR);
 });

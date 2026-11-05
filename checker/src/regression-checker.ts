@@ -1,8 +1,8 @@
 import * as path from 'path';
-import { Manifest, ChangedFiles, Finding, RegressionFinding } from './types';
+import { Manifest, ChangedFiles, Finding, RegressionFinding, DiffRecord } from './types';
 import { checkControl } from './control-detector';
 
-function matchesGlob(filePath: string, pattern: string): boolean {
+export function matchesGlob(filePath: string, pattern: string): boolean {
   // Simple glob support: convert * and ** to regex equivalents
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
@@ -16,8 +16,33 @@ export function runRegressionCheck(manifest: Manifest, changedFiles: ChangedFile
   const findings: Finding[] = [];
   const manifestFiles = new Set(manifest.surfaces.map((s) => s.location.file));
 
+  // Protected files that this PR renamed or moved, keyed by their old path
+  const movedTo = new Map<string, [string, DiffRecord]>();
+  for (const [filePath, record] of Object.entries(changedFiles)) {
+    if (record.renamedFrom) movedTo.set(record.renamedFrom, [filePath, record]);
+  }
+
   // --- Regression check: declared surfaces vs. changed files ---
   for (const surface of manifest.surfaces) {
+    const moved = movedTo.get(surface.location.file);
+    if (moved) {
+      // Check the control at its new location, and ask for the manifest to be updated
+      const [newPath, record] = moved;
+      const result = checkControl(surface, record);
+      findings.push({ type: 'moved-surface', surface, newPath, controlIntact: result.intact });
+      if (!result.intact) {
+        findings.push({
+          type: 'regression',
+          surface,
+          missingSignals: result.missingSignals,
+          triggeredAbsentSignals: result.triggeredAbsentSignals,
+          removedLines: record.removedLines,
+          addedLines: record.addedLines,
+        });
+      }
+      continue;
+    }
+
     const diffRecord = changedFiles[surface.location.file];
     if (!diffRecord) continue; // file not touched — no regression possible
 
@@ -54,7 +79,9 @@ export function runRegressionCheck(manifest: Manifest, changedFiles: ChangedFile
 
     for (const suspiciousPattern of suspicious_route_patterns) {
       const regex = new RegExp(suspiciousPattern.pattern, 'i');
-      if (regex.test(fileContent) || regex.test(path.basename(filePath))) {
+      // Full path too: frameworks like Next.js name every route file "route.ts"
+      // and put the URL in the folders (src/app/api/admin/route.ts)
+      if (regex.test(fileContent) || regex.test(path.basename(filePath)) || regex.test(`/${filePath}`)) {
         findings.push({
           type: 'unregistered-surface',
           file: filePath,
