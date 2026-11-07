@@ -1,5 +1,9 @@
 # Security Review Agent
 
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-Security%20Regression%20Check-blue?logo=github)](https://github.com/marketplace/actions/security-regression-check)
+[![Release](https://img.shields.io/github/v/release/jebitok-dev/security-review-agent)](https://github.com/jebitok-dev/security-review-agent/releases/latest)
+[![Tests](https://github.com/jebitok-dev/security-review-agent/actions/workflows/test.yml/badge.svg)](https://github.com/jebitok-dev/security-review-agent/actions/workflows/test.yml)
+
 A non-blocking GitHub Action that catches security regressions in pull requests: cases where a previously hardened route, endpoint, or feature silently loses its security control during a routine code change.
 
 > **Background**: This project is the implementation companion to the Substack article [Designing a Security-First Code Review Agent](https://jebit.substack.com/p/designing-a-security-first-code-review). The article covers the "why" in depth; this repo is the working "how".
